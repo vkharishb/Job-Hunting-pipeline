@@ -3,13 +3,12 @@ name: 🎯 Daily Job Hunt
 on:
   schedule:
     # 10:00 AM IST = 04:30 UTC
-    # Change this for your timezone — see README for timezone table
     - cron: "30 4 * * *"
-  workflow_dispatch:  # manual trigger from GitHub UI — use this to test!
+  workflow_dispatch:   # manual trigger from GitHub UI for testing
 
 jobs:
   job-hunt:
-    runs-on: ubuntu-latest   # free tier — no cost
+    runs-on: ubuntu-latest   # free tier
 
     steps:
       - name: ⬇️ Checkout repo (includes resume.pdf + prompt.txt)
@@ -21,11 +20,12 @@ jobs:
           python-version: "3.11"
 
       - name: 📦 Install dependencies
-        run: pip install anthropic openpyxl
+        run: pip install openpyxl
+        # Note: No anthropic package needed — Gemini uses built-in urllib
 
       - name: 🤖 Run AI job search + generate Excel
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scripts/generate_excel.py
 
       - name: 📧 Send email with Excel attachment
@@ -35,9 +35,9 @@ jobs:
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
         run: python scripts/send_email.py
 
-      - name: 📁 Upload Excel as workflow artifact (backup)
+      - name: 📁 Upload Excel as workflow artifact (30-day backup)
         uses: actions/upload-artifact@v4
         with:
           name: job-hunt-${{ github.run_id }}
           path: "jobs_*.xlsx"
-          retention-days: 30   # keep 30 days of history in GitHub itself
+          retention-days: 30
