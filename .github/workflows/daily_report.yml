@@ -1,4 +1,4 @@
-name: 🎯 Daily Job Hunt
+name: Daily Job Hunt
 
 on:
   schedule:
@@ -11,31 +11,31 @@ jobs:
     runs-on: ubuntu-latest   # free tier
 
     steps:
-      - name: ⬇️ Checkout repo (includes resume.pdf + prompt.txt)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python 3.11
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: 📦 Install dependencies
-        run: pip install openpyxl
-        # Note: No anthropic package needed — Gemini uses built-in urllib
+      - name: Install dependencies
+        run: pip install openpyxl pdfminer.six
+        # pdfminer.six extracts text from resume.pdf for Groq (text-only API)
 
-      - name: 🤖 Run AI job search + generate Excel
+      - name: Run AI job search + generate Excel
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python scripts/generate_excel.py
 
-      - name: 📧 Send email with Excel attachment
+      - name: Send email with Excel attachment
         env:
           GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
         run: python scripts/send_email.py
 
-      - name: 📁 Upload Excel as workflow artifact (30-day backup)
+      - name: Upload Excel as workflow artifact (30-day backup)
         uses: actions/upload-artifact@v4
         with:
           name: job-hunt-${{ github.run_id }}
