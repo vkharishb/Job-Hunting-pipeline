@@ -1,17 +1,17 @@
 """
-generate_excel.py  —  Job Hunting Machine (Gemini Edition)
------------------------------------------------------------
+generate_excel.py  —  Job Hunting Machine (Groq Edition)
+---------------------------------------------------------
 1. Reads resume.pdf or resume.txt from repo root
 2. Reads prompt.txt, substitutes placeholders
-3. Calls Google Gemini API (FREE - gemini-1.5-flash)
+3. Calls Groq API FREE (llama-3.3-70b-versatile) — 14,400 req/day free
 4. Parses JSON response
 5. Writes a rich, deduplicated Excel workbook:
-      Sheet 1 – Dashboard (summary + strengths/gaps)
-      Sheet 2 – All Jobs (sorted by fit_score, deduplicated)
-      Sheet 3 – High Probability  (fit >= 75)
-      Sheet 4 – Medium Probability (50-74)
-      Sheet 5 – Stretch Roles      (< 50)
-      Sheet 6 – 30-Day Resume Tips
+      Sheet 1 - Dashboard (summary + strengths/gaps)
+      Sheet 2 - All Jobs (sorted by fit_score, deduplicated)
+      Sheet 3 - High Probability  (fit >= 75)
+      Sheet 4 - Medium Probability (50-74)
+      Sheet 5 - Stretch Roles      (< 50)
+      Sheet 6 - 30-Day Resume Tips
 """
 
 import os, json, datetime, glob, sys, base64
@@ -93,60 +93,75 @@ def read_resume():
     )
 
 
-# ── Gemini API call (pure urllib — no SDK needed) ─────────────────────────────
+# ── PDF text extractor ────────────────────────────────────────────────────────
 
-def call_gemini(prompt_text, resume_text, media_type, resume_b64):
-    api_key = os.environ["GEMINI_API_KEY"]
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={api_key}"
-    )
+def extract_pdf_text(resume_b64):
+    """Extract plain text from PDF using pdfminer."""
+    try:
+        from pdfminer.high_level import extract_text_to_fp
+        from pdfminer.layout import LAParams
+        import io
+        pdf_bytes = base64.b64decode(resume_b64)
+        output = io.StringIO()
+        extract_text_to_fp(io.BytesIO(pdf_bytes), output, laparams=LAParams())
+        text = output.getvalue().strip()
+        if text:
+            print(f"✅ PDF text extracted ({len(text)} chars)")
+            return text
+    except Exception as e:
+        print(f"⚠️  pdfminer extraction failed: {e}")
+    return None
 
-    # Build parts
-    parts = []
 
+# ── Groq API call ─────────────────────────────────────────────────────────────
+
+def call_groq(prompt_text, resume_text, media_type, resume_b64):
+    api_key = os.environ["GROQ_API_KEY"]
+    url = "https://api.groq.com/openai/v1/chat/completions"
+
+    # Groq is text-only — extract PDF text if needed
     if media_type == "application/pdf":
-        parts.append({
-            "inline_data": {
-                "mime_type": "application/pdf",
-                "data": resume_b64
-            }
-        })
-        parts.append({"text": prompt_text.replace("{RESUME_TEXT}", "[See attached PDF resume above]")})
+        resume_content = extract_pdf_text(resume_b64)
+        if not resume_content:
+            print("⚠️  Could not extract PDF text. Please also add resume.txt to repo.")
+            resume_content = "[PDF resume attached but could not be extracted. Analyse based on job requirements only.]"
     else:
-        parts.append({"text": prompt_text.replace("{RESUME_TEXT}", resume_text or "")})
+        resume_content = resume_text or ""
+
+    full_prompt = prompt_text.replace("{RESUME_TEXT}", resume_content)
 
     payload = json.dumps({
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json"   # forces pure JSON output
-        }
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": full_prompt}],
+        "temperature": 0.3,
+        "max_tokens": 8000,
+        "response_format": {"type": "json_object"}
     }).encode("utf-8")
 
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        },
         method="POST"
     )
 
-    print("📡 Calling Gemini API (free tier)...")
+    print("📡 Calling Groq API (llama-3.3-70b-versatile — free)...")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8")
-        print(f"❌ Gemini API error {e.code}: {body}")
+        print(f"❌ Groq API error {e.code}: {body}")
         sys.exit(1)
 
-    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raw = result["choices"][0]["message"]["content"].strip()
 
-    # Strip accidental markdown fences just in case
     if raw.startswith("```"):
-        parts_split = raw.split("```")
-        raw = parts_split[1]
+        parts = raw.split("```")
+        raw = parts[1]
         if raw.startswith("json"):
             raw = raw[4:]
     return json.loads(raw.strip())
@@ -196,15 +211,15 @@ def write_job_row(ws, job):
         cell.border    = thin_border()
         cell.alignment = left() if col_idx > 2 else center()
 
-        if col_idx == 9:   # Fit score
+        if col_idx == 9:
             cell.fill = score_fill(score)
             cell.font = bfont(11, "1B1B1B")
             cell.alignment = center()
-        elif col_idx == 10:  # Probability
+        elif col_idx == 10:
             cell.fill = hfill(prob_bg)
             cell.font = bfont(10, prob_text_color)
             cell.alignment = center()
-        elif col_idx == 13:  # Apply URL
+        elif col_idx == 13:
             cell.font = Font(color="1565C0", underline="single", size=10)
         else:
             cell.font = Font(size=10, color="1B1B1B")
@@ -237,14 +252,14 @@ def build_excel(data: dict, output_path: str):
 
     # ── Sheet 1: Dashboard ────────────────────────────────────────────────────
     ws = wb.active
-    ws.title = "📊 Dashboard"
+    ws.title = "Dashboard"
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 62
 
     ws.merge_cells("A1:B1")
     c = ws["A1"]
-    c.value     = f"🎯 Job Hunt Dashboard  —  {today}  →  {target}"
+    c.value     = f"Job Hunt Dashboard  —  {today}  to  {target}"
     c.font      = bfont(15, "FFFFFF")
     c.fill      = hfill("1A237E")
     c.alignment = center()
@@ -261,11 +276,11 @@ def build_excel(data: dict, output_path: str):
     ws.append([])
 
     stats = [
-        ("Total Opportunities", len(jobs),  "283593"),
-        ("🟢 High Probability",  len(high),  "1B5E20"),
-        ("🟡 Medium Probability", len(medium),"E65100"),
-        ("🔴 Stretch Roles",     len(stretch),"B71C1C"),
-        ("📅 Target Date",       target,      "4A148C"),
+        ("Total Opportunities", len(jobs),   "283593"),
+        ("High Probability",    len(high),   "1B5E20"),
+        ("Medium Probability",  len(medium), "E65100"),
+        ("Stretch Roles",       len(stretch),"B71C1C"),
+        ("Target Date",         target,      "4A148C"),
     ]
     for label, val, fill_hex in stats:
         ws.append([label, val])
@@ -280,28 +295,28 @@ def build_excel(data: dict, output_path: str):
 
     ws.append([])
 
-    ws.append(["✅ Resume Strengths", ""])
+    ws.append(["Resume Strengths", ""])
     ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
     c = ws.cell(row=ws.max_row, column=1)
     c.font = bfont(12, "1B5E20"); c.fill = hfill("C8E6C9"); c.border = thin_border()
     for s in strengths:
-        ws.append(["", f"• {s}"])
+        ws.append(["", f"- {s}"])
         ws.cell(row=ws.max_row, column=2).font = Font(size=11, color="1B1B1B")
         ws.row_dimensions[ws.max_row].height = 20
 
     ws.append([])
 
-    ws.append(["⚠️ Resume Gaps", ""])
+    ws.append(["Resume Gaps", ""])
     ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
     c = ws.cell(row=ws.max_row, column=1)
     c.font = bfont(12, "B71C1C"); c.fill = hfill("FFCDD2"); c.border = thin_border()
     for g in gaps:
-        ws.append(["", f"• {g}"])
+        ws.append(["", f"- {g}"])
         ws.cell(row=ws.max_row, column=2).font = Font(size=11, color="1B1B1B")
         ws.row_dimensions[ws.max_row].height = 20
 
     # ── Sheet 2: All Jobs ─────────────────────────────────────────────────────
-    ws2 = wb.create_sheet("🗂 All Jobs")
+    ws2 = wb.create_sheet("All Jobs")
     ws2.sheet_view.showGridLines = False
     ws2.freeze_panes = "A3"
 
@@ -318,9 +333,9 @@ def build_excel(data: dict, output_path: str):
 
     # ── Sheets 3-5: Categorised ───────────────────────────────────────────────
     for sheet_title, job_list, fill_title, fill_hdr in [
-        ("🟢 High Probability",   high,    "1B5E20", "2E7D32"),
-        ("🟡 Medium Probability", medium,  "E65100", "EF6C00"),
-        ("🔴 Stretch Roles",      stretch, "B71C1C", "C62828"),
+        ("High Probability",   high,    "1B5E20", "2E7D32"),
+        ("Medium Probability", medium,  "E65100", "EF6C00"),
+        ("Stretch Roles",      stretch, "B71C1C", "C62828"),
     ]:
         wsc = wb.create_sheet(sheet_title)
         wsc.sheet_view.showGridLines = False
@@ -338,13 +353,13 @@ def build_excel(data: dict, output_path: str):
         set_col_widths(wsc, JOB_WIDTHS)
 
     # ── Sheet 6: 30-Day Resume Tips ───────────────────────────────────────────
-    ws6 = wb.create_sheet("📅 30-Day Resume Tips")
+    ws6 = wb.create_sheet("30-Day Resume Tips")
     ws6.sheet_view.showGridLines = False
     ws6.freeze_panes = "A3"
 
     ws6.merge_cells("A1:F1")
     c = ws6["A1"]
-    c.value = f"30-Day Resume Improvement Plan  |  {today} → {target}"
+    c.value = f"30-Day Resume Improvement Plan  |  {today} to {target}"
     c.font = bfont(13); c.fill = hfill("4A148C"); c.alignment = center()
     ws6.row_dimensions[1].height = 30
 
@@ -373,7 +388,7 @@ def build_excel(data: dict, output_path: str):
     set_col_widths(ws6, [5, 12, 20, 52, 36, 36])
 
     wb.save(output_path)
-    print(f"✅ Excel workbook saved → {output_path}")
+    print(f"✅ Excel workbook saved -> {output_path}")
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
@@ -394,8 +409,8 @@ def main():
     prompt = prompt.replace("{TODAY}", str(today))
     prompt = prompt.replace("{TARGET_DATE}", str(target_date))
 
-    print("🤖 Calling Gemini 1.5 Flash (free)...")
-    data = call_gemini(prompt, resume_text, media_type, resume_b64)
+    print("🤖 Calling Groq (llama-3.3-70b — free)...")
+    data = call_groq(prompt, resume_text, media_type, resume_b64)
 
     output_path = f"jobs_{today}.xlsx"
     print("📊 Building Excel workbook...")
