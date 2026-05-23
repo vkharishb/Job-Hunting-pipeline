@@ -99,7 +99,7 @@ def call_gemini(prompt_text, resume_text, media_type, resume_b64):
     api_key = os.environ["GEMINI_API_KEY"]
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={api_key}"
+        f"gemini-2.0-flash:generateContent?key={api_key}"
     )
 
     # Build parts
