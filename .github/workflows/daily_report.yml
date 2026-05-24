@@ -40,3 +40,28 @@ jobs:
           name: job-hunt-${{ github.run_id }}
           path: "jobs_*.xlsx"
           retention-days: 30
+
+      - name: Send email if failed
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+
+          subject: "❌ Job Automation Failed"
+
+          to: ${{ secrets.MAIL_TO }}
+          from: GitHub Actions
+
+          body: |
+            Your GitHub Action workflow failed.
+
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Run ID: ${{ github.run_id }}
+
+            Logs:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
