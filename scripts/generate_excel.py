@@ -1,17 +1,10 @@
 """
 generate_excel.py  —  Job Hunting Machine (OpenRouter Edition)
----------------------------------------------------------
-1. Reads resume.pdf or resume.txt from repo root
-2. Reads prompt.txt, substitutes placeholders
-3. Calls OpenRouter API FREE (llama-3.3-70b-instruct) — no credit card needed
-4. Parses JSON response
-5. Writes a rich, deduplicated Excel workbook:
-      Sheet 1 - Dashboard (summary + strengths/gaps)
-      Sheet 2 - All Jobs (sorted by fit_score, deduplicated)
-      Sheet 3 - High Probability  (fit >= 75)
-      Sheet 4 - Medium Probability (50-74)
-      Sheet 5 - Stretch Roles      (< 50)
-      Sheet 6 - 30-Day Resume Tips
+--------------------------------------------------------------
+Split into TWO API calls to avoid free-model timeouts:
+  Call 1 -> candidate analysis + job listings (JSON)
+  Call 2 -> 30-day resume tips (JSON)
+Then merges both into one Excel workbook.
 """
 
 import os, json, datetime, glob, sys, base64
@@ -19,7 +12,6 @@ import urllib.request, urllib.error
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-
 
 # ── styling helpers ───────────────────────────────────────────────────────────
 
@@ -72,11 +64,9 @@ def header_row(ws, headers, fill_hex, font_color="FFFFFF"):
         c.border    = thin_border()
     ws.row_dimensions[row].height = 22
 
-
 # ── resume reader ─────────────────────────────────────────────────────────────
 
 def read_resume():
-    """Returns (text, media_type, base64_data)"""
     for pattern in ["resume.pdf", "resume.PDF", "resume.txt", "cv.pdf", "cv.PDF", "cv.txt"]:
         matches = glob.glob(pattern)
         if matches:
@@ -88,15 +78,11 @@ def read_resume():
             else:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     return f.read(), "text/plain", None
-    raise FileNotFoundError(
-        "No resume found! Add resume.pdf or resume.txt to the repo root."
-    )
-
+    raise FileNotFoundError("No resume found! Add resume.pdf or resume.txt to the repo root.")
 
 # ── PDF text extractor ────────────────────────────────────────────────────────
 
 def extract_pdf_text(resume_b64):
-    """Extract plain text from PDF using pdfminer."""
     try:
         from pdfminer.high_level import extract_text_to_fp
         from pdfminer.layout import LAParams
@@ -106,51 +92,38 @@ def extract_pdf_text(resume_b64):
         extract_text_to_fp(io.BytesIO(pdf_bytes), output, laparams=LAParams())
         text = output.getvalue().strip()
         if text:
-            print(f"✅ PDF text extracted ({len(text)} chars)")
+            print(f"✅ PDF extracted ({len(text)} chars)")
             return text
     except Exception as e:
-        print(f"⚠️  pdfminer extraction failed: {e}")
+        print(f"⚠️  pdfminer failed: {e}")
     return None
 
+# ── OpenRouter API call ───────────────────────────────────────────────────────
 
-# ── OpenRouter API call ─────────────────────────────────────────────────────────────
-# Free models tried in order — auto-fallback if one is rate-limited
 FREE_MODELS = [
-    "openrouter/free",                          # auto-router: always picks a working free model
-    "deepseek/deepseek-v4-flash:free",          # DeepSeek V4 Flash - 1M ctx, top quality
-    "nvidia/nemotron-3-super-120b-a12b:free",   # NVIDIA 120B - 1M ctx
-    "meta-llama/llama-3.3-70b-instruct:free",  # Llama 3.3 70B - reliable fallback
-    "google/gemma-4-31b-it:free",              # Google Gemma 4 - 262K ctx
+    "openrouter/free",
+    "deepseek/deepseek-v4-flash:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-31b-it:free",
 ]
 
-def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
+def call_openrouter(prompt_text, call_label=""):
     api_key = os.environ["OPENROUTER_API_KEY"]
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    # OpenRouter is text-only — extract PDF text if needed
-    if media_type == "application/pdf":
-        resume_content = extract_pdf_text(resume_b64)
-        if not resume_content:
-            print("⚠️  Could not extract PDF text. Please also add resume.txt to repo.")
-            resume_content = "[PDF resume attached but could not be extracted. Analyse based on job requirements only.]"
-    else:
-        resume_content = resume_text or ""
-
-    full_prompt = prompt_text.replace("{RESUME_TEXT}", resume_content)
+    url     = "https://openrouter.ai/api/v1/chat/completions"
 
     for model in FREE_MODELS:
-        print(f"📡 Trying model: {model} ...")
+        print(f"📡 [{call_label}] Trying {model} ...")
         payload = json.dumps({
             "model": model,
-            "messages": [{"role": "user", "content": full_prompt}],
+            "messages": [{"role": "user", "content": prompt_text}],
             "temperature": 0.3,
             "max_tokens": 8000,
             "response_format": {"type": "json_object"}
         }).encode("utf-8")
 
         req = urllib.request.Request(
-            url,
-            data=payload,
+            url, data=payload,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
@@ -161,34 +134,121 @@ def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8")
-            print(f"⚠️  Model {model} failed ({e.code}) — trying next...")
+            print(f"⚠️  {model} HTTP {e.code}: {body[:200]} — trying next...")
+            continue
+        except Exception as e:
+            print(f"⚠️  {model} error: {e} — trying next...")
             continue
 
         if "error" in result:
-            print(f"⚠️  Model {model} upstream error — trying next...")
+            print(f"⚠️  {model} upstream error: {str(result['error'])[:200]} — trying next...")
             continue
 
         raw = result["choices"][0]["message"]["content"].strip()
-        if raw.startswith("```"):
+
+        # Print first 500 chars of raw response for debugging
+        print(f"🔍 Raw response preview: {raw[:500]}")
+
+        # Strip markdown fences
+        if "```" in raw:
             parts = raw.split("```")
-            raw = parts[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+            for part in parts:
+                cleaned = part.strip()
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:].strip()
+                if cleaned.startswith("{"):
+                    raw = cleaned
+                    break
+
         try:
             parsed = json.loads(raw.strip())
-            print(f"✅ Success with model: {model}")
+            # Validate it has actual data — not an empty shell
+            jobs = parsed.get("jobs", [])
+            tips = parsed.get("daily_resume_tips", [])
+            if call_label == "JOBS" and len(jobs) == 0:
+                print(f"⚠️  {model} returned 0 jobs — trying next model...")
+                continue
+            if call_label == "TIPS" and len(tips) == 0:
+                print(f"⚠️  {model} returned 0 tips — trying next model...")
+                continue
+            print(f"✅ [{call_label}] Success with {model} — jobs:{len(jobs)} tips:{len(tips)}")
             return parsed
-        except json.JSONDecodeError:
-            print(f"⚠️  Model {model} returned invalid JSON — trying next...")
+        except json.JSONDecodeError as e:
+            print(f"⚠️  {model} JSON parse error: {e} — trying next...")
             continue
 
-    print("❌ All models failed. Check https://openrouter.ai/models?q=free")
+    print(f"❌ All models failed for [{call_label}].")
     sys.exit(1)
 
+# ── prompt builders ───────────────────────────────────────────────────────────
+
+def build_jobs_prompt(resume_text, today, target_date):
+    return f"""You are an expert AI recruiter. Today: {today}. Target date: {target_date}.
+
+CANDIDATE RESUME:
+{resume_text}
+
+Find 25 real job opportunities in India for Associate/Mid-level DevOps Engineer (3-5 years experience).
+Target: startups, scale-ups, MNCs, consulting firms, tech and non-tech sectors.
+For each job assign a fit_score out of 100 and category: High (>=75), Medium (50-74), Stretch (<50).
+Never list the same company+role twice.
+
+Return ONLY a JSON object in this exact schema (no markdown, no explanation):
+{{
+  "analysis_date": "{today}",
+  "target_date": "{target_date}",
+  "candidate_summary": "<2-3 sentence profile summary>",
+  "resume_strengths": ["strength1", "strength2", "strength3"],
+  "resume_gaps": ["gap1", "gap2", "gap3"],
+  "jobs": [
+    {{
+      "rank": 1,
+      "company": "Company Name",
+      "role": "Exact Job Title",
+      "sector": "Tech/Non-Tech/Consulting/Startup/MNC",
+      "company_size": "Startup/Scale-up/MNC/Consulting",
+      "location": "City, India or Remote",
+      "experience_required": "3-5 years",
+      "key_skills_required": ["skill1", "skill2", "skill3"],
+      "fit_score": 85,
+      "probability_category": "High",
+      "match_reason": "Why this is a good match in 1-2 sentences",
+      "gap_reason": "What is missing in 1 sentence",
+      "apply_url": "https://direct-application-url.com",
+      "source": "LinkedIn/Company Careers/Naukri",
+      "estimated_ctc_lpa": "8-14 LPA"
+    }}
+  ]
+}}"""
+
+def build_tips_prompt(resume_text, today, target_date):
+    return f"""You are a professional resume coach. Today: {today}.
+
+CANDIDATE RESUME:
+{resume_text}
+
+Generate exactly 30 day-by-day resume improvement tips for a DevOps Engineer job hunt.
+Each tip must be specific to THIS candidate's resume, actionable, and include a before/after example.
+
+Return ONLY a JSON object (no markdown, no explanation):
+{{
+  "daily_resume_tips": [
+    {{
+      "day": 1,
+      "date": "{today}",
+      "focus_area": "Summary Section",
+      "tip": "Specific actionable tip for this candidate",
+      "example_before": "What their resume currently says",
+      "example_after": "Improved version"
+    }}
+  ]
+}}
+
+Generate all 30 days. Vary the focus areas across: Summary, Skills, Experience bullets, Quantification, Keywords, Certifications, Projects, LinkedIn, Cover letter, GitHub profile, etc."""
 
 # ── Excel builder ─────────────────────────────────────────────────────────────
 
@@ -200,64 +260,47 @@ JOB_HEADERS = [
 ]
 JOB_WIDTHS = [6, 22, 28, 14, 12, 16, 13, 34, 10, 11, 36, 30, 40, 14, 14]
 
-
 def write_job_row(ws, job):
     skills = ", ".join(job.get("key_skills_required", []))
     prob   = job.get("probability_category", "Medium")
     score  = int(job.get("fit_score", 0))
-
     row = [
-        job.get("rank", ""),
-        job.get("company", ""),
-        job.get("role", ""),
-        job.get("sector", ""),
-        job.get("company_size", ""),
-        job.get("location", ""),
-        job.get("experience_required", ""),
-        skills,
-        score,
-        prob,
-        job.get("match_reason", ""),
-        job.get("gap_reason", ""),
-        job.get("apply_url", ""),
-        job.get("source", ""),
+        job.get("rank", ""), job.get("company", ""), job.get("role", ""),
+        job.get("sector", ""), job.get("company_size", ""), job.get("location", ""),
+        job.get("experience_required", ""), skills, score, prob,
+        job.get("match_reason", ""), job.get("gap_reason", ""),
+        job.get("apply_url", ""), job.get("source", ""),
         job.get("estimated_ctc_lpa", "Unknown"),
     ]
     ws.append(row)
     r = ws.max_row
     ws.row_dimensions[r].height = 42
-
     prob_text_color, prob_bg = PROB_COLORS.get(prob, ("000000", "FFFFFF"))
-
     for col_idx in range(1, len(row)+1):
         cell = ws.cell(row=r, column=col_idx)
         cell.border    = thin_border()
         cell.alignment = left() if col_idx > 2 else center()
-
         if col_idx == 9:
             cell.fill = score_fill(score)
-            cell.font = bfont(11, "1B1B1B")
-            cell.alignment = center()
+            cell.font = bfont(11, "1B1B1B"); cell.alignment = center()
         elif col_idx == 10:
             cell.fill = hfill(prob_bg)
-            cell.font = bfont(10, prob_text_color)
-            cell.alignment = center()
+            cell.font = bfont(10, prob_text_color); cell.alignment = center()
         elif col_idx == 13:
             cell.font = Font(color="1565C0", underline="single", size=10)
         else:
             cell.font = Font(size=10, color="1B1B1B")
 
-
-def build_excel(data: dict, output_path: str):
+def build_excel(jobs_data, tips_data, output_path):
     wb = openpyxl.Workbook()
 
-    today     = data.get("analysis_date", datetime.date.today().isoformat())
-    target    = data.get("target_date", "")
-    candidate = data.get("candidate_summary", "")
-    strengths = data.get("resume_strengths", [])
-    gaps      = data.get("resume_gaps", [])
-    jobs      = data.get("jobs", [])
-    tips      = data.get("daily_resume_tips", [])
+    today     = jobs_data.get("analysis_date", str(datetime.date.today()))
+    target    = jobs_data.get("target_date", "")
+    candidate = jobs_data.get("candidate_summary", "")
+    strengths = jobs_data.get("resume_strengths", [])
+    gaps      = jobs_data.get("resume_gaps", [])
+    jobs      = jobs_data.get("jobs", [])
+    tips      = tips_data.get("daily_resume_tips", [])
 
     # Deduplicate by (company, role) — keep highest fit_score
     seen = {}
@@ -282,42 +325,35 @@ def build_excel(data: dict, output_path: str):
 
     ws.merge_cells("A1:B1")
     c = ws["A1"]
-    c.value     = f"Job Hunt Dashboard  —  {today}  to  {target}"
-    c.font      = bfont(15, "FFFFFF")
-    c.fill      = hfill("1A237E")
-    c.alignment = center()
+    c.value = f"Job Hunt Dashboard  —  {today}  to  {target}"
+    c.font = bfont(15, "FFFFFF"); c.fill = hfill("1A237E"); c.alignment = center()
     ws.row_dimensions[1].height = 38
 
     ws.merge_cells("A2:B2")
     c = ws["A2"]
-    c.value     = candidate
-    c.font      = Font(italic=True, size=11, color="37474F")
-    c.fill      = hfill("E8EAF6")
-    c.alignment = left()
+    c.value = candidate
+    c.font = Font(italic=True, size=11, color="37474F")
+    c.fill = hfill("E8EAF6"); c.alignment = left()
     ws.row_dimensions[2].height = 30
 
     ws.append([])
-
-    stats = [
+    for label, val, fill_hex in [
         ("Total Opportunities", len(jobs),   "283593"),
         ("High Probability",    len(high),   "1B5E20"),
         ("Medium Probability",  len(medium), "E65100"),
         ("Stretch Roles",       len(stretch),"B71C1C"),
         ("Target Date",         target,      "4A148C"),
-    ]
-    for label, val, fill_hex in stats:
+    ]:
         ws.append([label, val])
         r = ws.max_row
         for col in [1, 2]:
             cell = ws.cell(row=r, column=col)
-            cell.fill      = hfill(fill_hex)
-            cell.font      = bfont(11, "FFFFFF")
+            cell.fill = hfill(fill_hex); cell.font = bfont(11, "FFFFFF")
             cell.alignment = left() if col == 2 else center()
-            cell.border    = thin_border()
+            cell.border = thin_border()
         ws.row_dimensions[r].height = 24
 
     ws.append([])
-
     ws.append(["Resume Strengths", ""])
     ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
     c = ws.cell(row=ws.max_row, column=1)
@@ -328,7 +364,6 @@ def build_excel(data: dict, output_path: str):
         ws.row_dimensions[ws.max_row].height = 20
 
     ws.append([])
-
     ws.append(["Resume Gaps", ""])
     ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
     c = ws.cell(row=ws.max_row, column=1)
@@ -340,18 +375,14 @@ def build_excel(data: dict, output_path: str):
 
     # ── Sheet 2: All Jobs ─────────────────────────────────────────────────────
     ws2 = wb.create_sheet("All Jobs")
-    ws2.sheet_view.showGridLines = False
-    ws2.freeze_panes = "A3"
-
+    ws2.sheet_view.showGridLines = False; ws2.freeze_panes = "A3"
     ws2.merge_cells(f"A1:{get_column_letter(len(JOB_HEADERS))}1")
     c = ws2["A1"]
     c.value = f"All Opportunities — Sorted by Fit Score  |  {today}"
     c.font = bfont(13); c.fill = hfill("1A237E"); c.alignment = center()
     ws2.row_dimensions[1].height = 30
-
     header_row(ws2, JOB_HEADERS, "283593")
-    for j in jobs:
-        write_job_row(ws2, j)
+    for j in jobs: write_job_row(ws2, j)
     set_col_widths(ws2, JOB_WIDTHS)
 
     # ── Sheets 3-5: Categorised ───────────────────────────────────────────────
@@ -361,84 +392,71 @@ def build_excel(data: dict, output_path: str):
         ("Stretch Roles",      stretch, "B71C1C", "C62828"),
     ]:
         wsc = wb.create_sheet(sheet_title)
-        wsc.sheet_view.showGridLines = False
-        wsc.freeze_panes = "A3"
-
+        wsc.sheet_view.showGridLines = False; wsc.freeze_panes = "A3"
         wsc.merge_cells(f"A1:{get_column_letter(len(JOB_HEADERS))}1")
         c = wsc["A1"]
         c.value = f"{sheet_title}  |  {len(job_list)} roles  |  {today}"
         c.font = bfont(13); c.fill = hfill(fill_title); c.alignment = center()
         wsc.row_dimensions[1].height = 30
-
         header_row(wsc, JOB_HEADERS, fill_hdr)
-        for j in job_list:
-            write_job_row(wsc, j)
+        for j in job_list: write_job_row(wsc, j)
         set_col_widths(wsc, JOB_WIDTHS)
 
-    # ── Sheet 6: 30-Day Resume Tips ───────────────────────────────────────────
+    # ── Sheet 6: 30-Day Tips ──────────────────────────────────────────────────
     ws6 = wb.create_sheet("30-Day Resume Tips")
-    ws6.sheet_view.showGridLines = False
-    ws6.freeze_panes = "A3"
-
+    ws6.sheet_view.showGridLines = False; ws6.freeze_panes = "A3"
     ws6.merge_cells("A1:F1")
     c = ws6["A1"]
     c.value = f"30-Day Resume Improvement Plan  |  {today} to {target}"
     c.font = bfont(13); c.fill = hfill("4A148C"); c.alignment = center()
     ws6.row_dimensions[1].height = 30
-
     header_row(ws6, ["Day", "Date", "Focus Area", "Tip (Actionable)", "Before", "After"], "6A1B9A")
-
     for tip in tips:
         ws6.append([
-            tip.get("day", ""),
-            tip.get("date", ""),
-            tip.get("focus_area", ""),
-            tip.get("tip", ""),
-            tip.get("example_before", ""),
-            tip.get("example_after", ""),
+            tip.get("day", ""), tip.get("date", ""), tip.get("focus_area", ""),
+            tip.get("tip", ""), tip.get("example_before", ""), tip.get("example_after", ""),
         ])
-        r = ws6.max_row
-        ws6.row_dimensions[r].height = 44
+        r = ws6.max_row; ws6.row_dimensions[r].height = 44
         fill_hex = "F3E5F5" if tip.get("day", 0) % 2 == 0 else "FFFFFF"
         for col in range(1, 7):
             cell = ws6.cell(row=r, column=col)
-            cell.fill      = hfill(fill_hex)
-            cell.alignment = left()
-            cell.border    = thin_border()
-            cell.font      = Font(size=10, color="1B1B1B")
+            cell.fill = hfill(fill_hex); cell.alignment = left()
+            cell.border = thin_border(); cell.font = Font(size=10, color="1B1B1B")
         ws6.cell(row=r, column=1).alignment = center()
-
     set_col_widths(ws6, [5, 12, 20, 52, 36, 36])
 
     wb.save(output_path)
-    print(f"✅ Excel workbook saved -> {output_path}")
-
+    print(f"✅ Excel saved -> {output_path}  ({len(jobs)} jobs, {len(tips)} tips)")
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
 
 def main():
-    today       = datetime.date.today()
-    target_date = today + datetime.timedelta(days=30)
+    today       = str(datetime.date.today())
+    target_date = str(datetime.date.today() + datetime.timedelta(days=30))
 
     print("📄 Reading resume...")
     resume_text, media_type, resume_b64 = read_resume()
+    if media_type == "application/pdf":
+        resume_content = extract_pdf_text(resume_b64) or "[PDF unreadable]"
+    else:
+        resume_content = resume_text or ""
 
-    print("📝 Preparing prompt...")
-    with open("prompt.txt", "r") as f:
-        raw_prompt = f.read()
+    print(f"📝 Resume length: {len(resume_content)} chars")
 
-    prompt_lines = [l for l in raw_prompt.splitlines() if not l.strip().startswith("#")]
-    prompt = "\n".join(prompt_lines).strip()
-    prompt = prompt.replace("{TODAY}", str(today))
-    prompt = prompt.replace("{TARGET_DATE}", str(target_date))
+    # ── Call 1: Jobs ──────────────────────────────────────────────────────────
+    print("\n🤖 CALL 1: Fetching job listings...")
+    jobs_prompt = build_jobs_prompt(resume_content, today, target_date)
+    jobs_data   = call_openrouter(jobs_prompt, call_label="JOBS")
 
-    print("🤖 Calling OpenRouter (llama-3.3-70b — free)...")
-    data = call_openrouter(prompt, resume_text, media_type, resume_b64)
+    # ── Call 2: Tips ──────────────────────────────────────────────────────────
+    print("\n🤖 CALL 2: Generating 30-day resume tips...")
+    tips_prompt = build_tips_prompt(resume_content, today, target_date)
+    tips_data   = call_openrouter(tips_prompt, call_label="TIPS")
 
+    # ── Build Excel ───────────────────────────────────────────────────────────
     output_path = f"jobs_{today}.xlsx"
-    print("📊 Building Excel workbook...")
-    build_excel(data, output_path)
-
+    print(f"\n📊 Building Excel workbook -> {output_path}")
+    build_excel(jobs_data, tips_data, output_path)
 
 if __name__ == "__main__":
     main()
