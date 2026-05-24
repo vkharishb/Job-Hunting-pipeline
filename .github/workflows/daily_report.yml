@@ -4,11 +4,16 @@ on:
   schedule:
     # 10:00 AM IST = 04:30 UTC
     - cron: "30 4 * * *"
+  workflow_run:
+   branches:
+     - main
   workflow_dispatch:   # manual trigger from GitHub UI for testing
 
 jobs:
   job-hunt:
-    runs-on: ubuntu-latest   # free tier
+    runs-on: ubuntu-latest  
+    
+    
 
     steps:
       - name: Checkout repo
