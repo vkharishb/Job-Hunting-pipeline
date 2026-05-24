@@ -116,10 +116,11 @@ def extract_pdf_text(resume_b64):
 # ── OpenRouter API call ─────────────────────────────────────────────────────────────
 # Free models tried in order — auto-fallback if one is rate-limited
 FREE_MODELS = [
-    "deepseek/deepseek-r1-0528:free",
-    "google/gemma-3-27b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen3-8b:free",
+    "openrouter/free",                          # auto-router: always picks a working free model
+    "deepseek/deepseek-v4-flash:free",          # DeepSeek V4 Flash - 1M ctx, top quality
+    "nvidia/nemotron-3-super-120b-a12b:free",   # NVIDIA 120B - 1M ctx
+    "meta-llama/llama-3.3-70b-instruct:free",  # Llama 3.3 70B - reliable fallback
+    "google/gemma-4-31b-it:free",              # Google Gemma 4 - 262K ctx
 ]
 
 def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
