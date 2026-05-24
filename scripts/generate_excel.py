@@ -114,6 +114,13 @@ def extract_pdf_text(resume_b64):
 
 
 # ── OpenRouter API call ─────────────────────────────────────────────────────────────
+# Free models tried in order — auto-fallback if one is rate-limited
+FREE_MODELS = [
+    "deepseek/deepseek-r1-0528:free",
+    "google/gemma-3-27b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen3-8b:free",
+]
 
 def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
     api_key = os.environ["OPENROUTER_API_KEY"]
@@ -130,47 +137,56 @@ def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
 
     full_prompt = prompt_text.replace("{RESUME_TEXT}", resume_content)
 
-    payload = json.dumps({
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
-        "messages": [{"role": "user", "content": full_prompt}],
-        "temperature": 0.3,
-        "max_tokens": 8000,
-        "response_format": {"type": "json_object"}
-    }).encode("utf-8")
+    for model in FREE_MODELS:
+        print(f"📡 Trying model: {model} ...")
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": full_prompt}],
+            "temperature": 0.3,
+            "max_tokens": 8000,
+            "response_format": {"type": "json_object"}
+        }).encode("utf-8")
 
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://github.com/job-hunt-bot",
-            "X-Title": "Job Hunt Bot"
-        },
-        method="POST"
-    )
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://github.com/job-hunt-bot",
+                "X-Title": "Job Hunt Bot"
+            },
+            method="POST"
+        )
 
-    print("📡 Calling OpenRouter API (llama-3.3-70b — free)...")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8")
-        print(f"❌ OpenRouter API error {e.code}: {body}")
-        sys.exit(1)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8")
+            print(f"⚠️  Model {model} failed ({e.code}) — trying next...")
+            continue
 
-    if "error" in result:
-        print(f"❌ OpenRouter upstream error: {result['error']}")
-        sys.exit(1)
+        if "error" in result:
+            print(f"⚠️  Model {model} upstream error — trying next...")
+            continue
 
-    raw = result["choices"][0]["message"]["content"].strip()
+        raw = result["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        try:
+            parsed = json.loads(raw.strip())
+            print(f"✅ Success with model: {model}")
+            return parsed
+        except json.JSONDecodeError:
+            print(f"⚠️  Model {model} returned invalid JSON — trying next...")
+            continue
 
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    print("❌ All models failed. Check https://openrouter.ai/models?q=free")
+    sys.exit(1)
 
 
 # ── Excel builder ─────────────────────────────────────────────────────────────
