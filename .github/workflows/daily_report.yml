@@ -21,11 +21,11 @@ jobs:
 
       - name: Install dependencies
         run: pip install openpyxl pdfminer.six
-        # pdfminer.six extracts text from resume.pdf for Groq (text-only API)
+        # pdfminer.six extracts text from resume.pdf for OpenRouter (text-only API)
 
       - name: Run AI job search + generate Excel
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python scripts/generate_excel.py
 
       - name: Send email with Excel attachment
