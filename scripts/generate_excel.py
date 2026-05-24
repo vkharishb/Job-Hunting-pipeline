@@ -1,9 +1,9 @@
 """
-generate_excel.py  —  Job Hunting Machine (Groq Edition)
+generate_excel.py  —  Job Hunting Machine (OpenRouter Edition)
 ---------------------------------------------------------
 1. Reads resume.pdf or resume.txt from repo root
 2. Reads prompt.txt, substitutes placeholders
-3. Calls Groq API FREE (llama-3.3-70b-versatile) — 14,400 req/day free
+3. Calls OpenRouter API FREE (llama-3.3-70b-instruct) — no credit card needed
 4. Parses JSON response
 5. Writes a rich, deduplicated Excel workbook:
       Sheet 1 - Dashboard (summary + strengths/gaps)
@@ -113,13 +113,13 @@ def extract_pdf_text(resume_b64):
     return None
 
 
-# ── Groq API call ─────────────────────────────────────────────────────────────
+# ── OpenRouter API call ─────────────────────────────────────────────────────────────
 
-def call_groq(prompt_text, resume_text, media_type, resume_b64):
-    api_key = os.environ["GROQ_API_KEY"]
-    url = "https://api.groq.com/openai/v1/chat/completions"
+def call_openrouter(prompt_text, resume_text, media_type, resume_b64):
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Groq is text-only — extract PDF text if needed
+    # OpenRouter is text-only — extract PDF text if needed
     if media_type == "application/pdf":
         resume_content = extract_pdf_text(resume_b64)
         if not resume_content:
@@ -131,7 +131,7 @@ def call_groq(prompt_text, resume_text, media_type, resume_b64):
     full_prompt = prompt_text.replace("{RESUME_TEXT}", resume_content)
 
     payload = json.dumps({
-        "model": "llama-3.3-70b-versatile",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [{"role": "user", "content": full_prompt}],
         "temperature": 0.3,
         "max_tokens": 8000,
@@ -143,18 +143,24 @@ def call_groq(prompt_text, resume_text, media_type, resume_b64):
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/job-hunt-bot",
+            "X-Title": "Job Hunt Bot"
         },
         method="POST"
     )
 
-    print("📡 Calling Groq API (llama-3.3-70b-versatile — free)...")
+    print("📡 Calling OpenRouter API (llama-3.3-70b — free)...")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8")
-        print(f"❌ Groq API error {e.code}: {body}")
+        print(f"❌ OpenRouter API error {e.code}: {body}")
+        sys.exit(1)
+
+    if "error" in result:
+        print(f"❌ OpenRouter upstream error: {result['error']}")
         sys.exit(1)
 
     raw = result["choices"][0]["message"]["content"].strip()
@@ -409,8 +415,8 @@ def main():
     prompt = prompt.replace("{TODAY}", str(today))
     prompt = prompt.replace("{TARGET_DATE}", str(target_date))
 
-    print("🤖 Calling Groq (llama-3.3-70b — free)...")
-    data = call_groq(prompt, resume_text, media_type, resume_b64)
+    print("🤖 Calling OpenRouter (llama-3.3-70b — free)...")
+    data = call_openrouter(prompt, resume_text, media_type, resume_b64)
 
     output_path = f"jobs_{today}.xlsx"
     print("📊 Building Excel workbook...")
