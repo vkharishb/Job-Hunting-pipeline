@@ -345,6 +345,7 @@ def build_excel(jobs_data, tips_data, output_path):
         ("Target Date",         target,      "4A148C"),
     ]:
         ws.append([label, val])
+        ws.append(['AI Model', MODEL_NAME])   # where MODEL_NAME = "gemini-1.5-flash"
         r = ws.max_row
         for col in [1, 2]:
             cell = ws.cell(row=r, column=col)
