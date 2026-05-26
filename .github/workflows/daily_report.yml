@@ -48,12 +48,12 @@ jobs:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
+          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
 
           subject: "❌ Job Automation Failed"
 
-          to: ${{ secrets.MAIL_TO }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
           from: GitHub Actions
 
           body: |
