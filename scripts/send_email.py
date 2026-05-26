@@ -81,7 +81,7 @@ def main():
   </div>
 
   <div style="background:#1A237E;color:#fff;padding:12px;text-align:center;border-radius:0 0 8px 8px;font-size:12px">
-    Zero-budget job hunting automation · Powered by Claude AI + GitHub Actions
+    Zero-budget job hunting automation 
   </div>
 </body></html>
 """
