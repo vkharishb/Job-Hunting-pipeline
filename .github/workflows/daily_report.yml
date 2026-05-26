@@ -3,7 +3,7 @@ name: Daily Job Hunt
 on:
   schedule:
     # 10:00 AM IST = 04:30 UTC
-    - cron: '0 */6 * * *'   
+    - cron: '30 4,16 * * *'   
   workflow_dispatch:   # manual trigger from GitHub UI for testing
 
 jobs:
@@ -48,13 +48,14 @@ jobs:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
-          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
+          
+          username:     ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASS }}
 
           subject: "❌ Job Automation Failed"
 
-          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
-          from: ${{ secrets.GMAIL_USER }}
+          to:       ${{ secrets.EMAIL_TO }}
+          from:     ${{ secrets.GMAIL_USER }}
 
           body: |
             Your GitHub Action workflow failed.
