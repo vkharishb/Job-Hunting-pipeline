@@ -3,8 +3,19 @@ name: Daily Job Hunt
 on:
   schedule:
     # 10:00 AM IST = 04:30 UTC
-    - cron: '30 4,16 * * *'   
+    - cron: "30 4 * * *"
   workflow_dispatch:   # manual trigger from GitHub UI for testing
+    inputs:
+      run_step:
+        description: "Which step to run?"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - generate_excel
+          - send_email
+          - upload_artifact
 
 jobs:
   job-hunt:
@@ -23,11 +34,14 @@ jobs:
         run: pip install openpyxl pdfminer.six
 
       - name: Run AI job search + generate Excel
+        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'generate_excel' }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SERPAPI_KEY:        ${{ secrets.SERPAPI_KEY }}
         run: python scripts/generate_excel.py
 
       - name: Send email with Excel attachment
+        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'send_email' }}
         env:
           GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
@@ -35,34 +49,9 @@ jobs:
         run: python scripts/send_email.py
 
       - name: Upload Excel as workflow artifact (30-day backup)
+        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'upload_artifact' }}
         uses: actions/upload-artifact@v4
         with:
           name: job-hunt-${{ github.run_id }}
           path: "jobs_*.xlsx"
           retention-days: 30
-
-      - name: Send email if failed
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          
-          username:     ${{ secrets.GMAIL_USER }}
-          password: ${{ secrets.GMAIL_APP_PASS }}
-
-          subject: "❌ Job Automation Failed"
-
-          to:       ${{ secrets.EMAIL_TO }}
-          from:     ${{ secrets.GMAIL_USER }}
-
-          body: |
-            Your GitHub Action workflow failed.
-
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Run ID: ${{ github.run_id }}
-
-            Logs:
-            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
