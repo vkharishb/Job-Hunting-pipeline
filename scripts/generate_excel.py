@@ -102,10 +102,17 @@ def extract_pdf_text(resume_b64):
 
 FREE_MODELS = [
     "openrouter/free",
+    "openai/gpt-oss-120b:free",
     "deepseek/deepseek-v4-flash:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "google/gemma-4-31b-it:free",
+    "z-ai/glm-4.5-air:free",
+    "poolside/laguna-m.1:free",
+    "openrouter/owl-alpha",
+    "qwen/qwen3-235b-a22b:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
+    "microsoft/phi-4-reasoning-plus:free",
 ]
 
 def call_openrouter(prompt_text, call_label=""):
