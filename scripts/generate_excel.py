@@ -291,7 +291,7 @@ def write_job_row(ws, job):
         else:
             cell.font = Font(size=10, color="1B1B1B")
 
-def build_excel(jobs_data, tips_data, output_path):
+def build_excel(jobs_data, tips_data, output_path, used_model):
     wb = openpyxl.Workbook()
 
     today     = jobs_data.get("analysis_date", str(datetime.date.today()))
@@ -343,9 +343,9 @@ def build_excel(jobs_data, tips_data, output_path):
         ("Medium Probability",  len(medium), "E65100"),
         ("Stretch Roles",       len(stretch),"B71C1C"),
         ("Target Date",         target,      "4A148C"),
+        ("AI Model",            model_name,  "546E7A"),
     ]:
         ws.append([label, val])
-        ws.append(['AI Model', MODEL_NAME])   # where MODEL_NAME = "gemini-1.5-flash"
         r = ws.max_row
         for col in [1, 2]:
             cell = ws.cell(row=r, column=col)
@@ -457,7 +457,7 @@ def main():
     # ── Build Excel ───────────────────────────────────────────────────────────
     output_path = f"jobs_{today}.xlsx"
     print(f"\n📊 Building Excel workbook -> {output_path}")
-    build_excel(jobs_data, tips_data, output_path)
+    build_excel(jobs_data, tips_data, output_path, used_model)
 
 if __name__ == "__main__":
     main()
