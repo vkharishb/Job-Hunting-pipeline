@@ -54,7 +54,7 @@ jobs:
           subject: "❌ Job Automation Failed"
 
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions
+          from: ${{ secrets.GMAIL_USER }}
 
           body: |
             Your GitHub Action workflow failed.
