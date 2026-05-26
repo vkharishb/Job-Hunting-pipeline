@@ -1,14 +1,15 @@
 """
 generate_excel.py  —  Job Hunting Machine (OpenRouter Edition)
 --------------------------------------------------------------
-Split into TWO API calls to avoid free-model timeouts:
-  Call 1 -> candidate analysis + job listings (JSON)
-  Call 2 -> 30-day resume tips (JSON)
-Then merges both into one Excel workbook.
+Flow:
+  Step 0 -> Search live jobs via SerpAPI (Google Jobs) — real, fresh listings
+  Call 1 -> LLM analyses resume + scores the live jobs (JSON)
+  Call 2 -> LLM generates 30-day resume tips (JSON)
+  Step 3 -> Build Excel workbook from both responses
 """
 
 import os, json, datetime, glob, sys, base64
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -98,6 +99,80 @@ def extract_pdf_text(resume_b64):
         print(f"⚠️  pdfminer failed: {e}")
     return None
 
+# ── Live job search via SerpAPI (Google Jobs) ─────────────────────────────────
+# Free tier: 100 searches/month — https://serpapi.com
+# Add SERPAPI_KEY to your GitHub secrets to enable live job search.
+# If key is missing, pipeline falls back to LLM-only mode (no live search).
+
+SEARCH_QUERIES = [
+    "DevOps Engineer India",
+    "Site Reliability Engineer India",
+    "Cloud Engineer AWS Kubernetes India",
+    "Platform Engineer DevOps India",
+]
+
+def search_live_jobs(today):
+    api_key = os.environ.get("SERPAPI_KEY", "")
+    if not api_key:
+        print("⚠️  SERPAPI_KEY not set — skipping live job search, using LLM-only mode.")
+        return ""
+
+    all_jobs = []
+    for query in SEARCH_QUERIES:
+        params = urllib.parse.urlencode({
+            "engine":   "google_jobs",
+            "q":        query,
+            "location": "India",
+            "chips":    "date_posted:week",   # only last 7 days
+            "api_key":  api_key,
+        })
+        url = f"https://serpapi.com/search?{params}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "job-hunt-bot/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            results = data.get("jobs_results", [])
+            print(f"🔍 '{query}' → {len(results)} live jobs found")
+            for job in results[:8]:   # cap per query to stay within token budget
+                all_jobs.append({
+                    "title":        job.get("title", ""),
+                    "company":      job.get("company_name", ""),
+                    "location":     job.get("location", ""),
+                    "posted":       job.get("detected_extensions", {}).get("posted_at", ""),
+                    "work_type":    job.get("detected_extensions", {}).get("work_from_home", False),
+                    "description":  job.get("description", "")[:600],   # truncate for token budget
+                    "apply_url":    (job.get("related_links") or [{}])[0].get("link", ""),
+                    "job_id":       job.get("job_id", ""),
+                })
+        except Exception as e:
+            print(f"⚠️  SerpAPI search failed for '{query}': {e}")
+            continue
+
+    if not all_jobs:
+        print("⚠️  No live jobs returned from SerpAPI.")
+        return ""
+
+    # Deduplicate by company+title
+    seen = set()
+    unique = []
+    for j in all_jobs:
+        key = (j["company"].lower(), j["title"].lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(j)
+
+    print(f"✅ {len(unique)} unique live jobs fetched from SerpAPI")
+    lines = ["LIVE JOB LISTINGS (fetched today from Google Jobs — use these as the basis for your job list):"]
+    for i, j in enumerate(unique, 1):
+        wtype = "Remote" if j["work_type"] else "On-site/Hybrid"
+        lines.append(
+            f"{i}. {j['title']} @ {j['company']} | {j['location']} | {wtype} | "
+            f"Posted: {j['posted']} | Job ID: {j['job_id']}\n"
+            f"   Apply: {j['apply_url']}\n"
+            f"   Desc: {j['description']}"
+        )
+    return "\n".join(lines)
+
 # ── OpenRouter API call ───────────────────────────────────────────────────────
 
 FREE_MODELS = [
@@ -173,7 +248,6 @@ def call_openrouter(prompt_text, call_label=""):
 
         try:
             parsed = json.loads(raw.strip())
-            # Validate it has actual data — not an empty shell
             jobs = parsed.get("jobs", [])
             tips = parsed.get("daily_resume_tips", [])
             if call_label == "JOBS" and len(jobs) == 0:
@@ -183,7 +257,7 @@ def call_openrouter(prompt_text, call_label=""):
                 print(f"⚠️  {model} returned 0 tips — trying next model...")
                 continue
             print(f"✅ [{call_label}] Success with {model} — jobs:{len(jobs)} tips:{len(tips)}")
-            return parsed
+            return parsed, model
         except json.JSONDecodeError as e:
             print(f"⚠️  {model} JSON parse error: {e} — trying next...")
             continue
@@ -193,22 +267,30 @@ def call_openrouter(prompt_text, call_label=""):
 
 # ── prompt builders ───────────────────────────────────────────────────────────
 
-def build_jobs_prompt(resume_text, today, target_date):
-    return f"""You are an expert AI recruiter. Today: {today}. Target date: {target_date}.
+def build_jobs_prompt(resume_text, today, target_date, live_jobs_text=""):
+    live_section = f"\n{live_jobs_text}\n" if live_jobs_text else "\n(No live listings available — generate best-guess jobs based on current market.)\n"
+    return f"""You are an expert AI recruiter and ATS specialist. Today: {today}. Target date: {target_date}.
 
 CANDIDATE RESUME:
 {resume_text}
+{live_section}
+Your tasks:
+1. Analyse the resume — skills, experience, tech stack, strengths, gaps.
+2. ATS analysis: score the resume out of 100, list formatting issues and missing keywords.
+3. Using the LIVE JOB LISTINGS above as your primary source (plus your knowledge for gaps), build a final list of 25-35 DevOps Engineer jobs in India.
+   - Prioritise jobs from the live listings — they are real and fresh.
+   - For each job: assign fit_score (resume match), ats_match_score (keyword match), work_type, posting_date.
+   - Categorise: High (fit>=75), Medium (50-74), Stretch (<50).
+   - Never list the same company+role twice.
 
-Find 25 real job opportunities in India for Associate/Mid-level DevOps Engineer (3-5 years experience).
-Target: startups, scale-ups, MNCs, consulting firms, tech and non-tech sectors.
-For each job assign a fit_score out of 100 and category: High (>=75), Medium (50-74), Stretch (<50).
-Never list the same company+role twice.
-
-Return ONLY a JSON object in this exact schema (no markdown, no explanation):
+Return ONLY valid JSON, no markdown:
 {{
   "analysis_date": "{today}",
   "target_date": "{target_date}",
-  "candidate_summary": "<2-3 sentence profile summary>",
+  "candidate_summary": "<2-3 sentence profile>",
+  "ats_score": 74,
+  "ats_issues": ["issue1", "issue2", "issue3"],
+  "ats_missing_keywords": ["keyword1", "keyword2", "keyword3"],
   "resume_strengths": ["strength1", "strength2", "strength3"],
   "resume_gaps": ["gap1", "gap2", "gap3"],
   "jobs": [
@@ -219,14 +301,19 @@ Return ONLY a JSON object in this exact schema (no markdown, no explanation):
       "sector": "Tech/Non-Tech/Consulting/Startup/MNC",
       "company_size": "Startup/Scale-up/MNC/Consulting",
       "location": "City, India or Remote",
+      "work_type": "On-site/Hybrid/Remote",
       "experience_required": "3-5 years",
       "key_skills_required": ["skill1", "skill2", "skill3"],
       "fit_score": 85,
+      "ats_match_score": 78,
       "probability_category": "High",
-      "match_reason": "Why this is a good match in 1-2 sentences",
+      "match_reason": "Why good match in 1-2 sentences",
       "gap_reason": "What is missing in 1 sentence",
-      "apply_url": "https://direct-application-url.com",
-      "source": "LinkedIn/Company Careers/Naukri",
+      "posting_date": "YYYY-MM-DD",
+      "job_id": "platform job ID or null",
+      "apply_url": "https://direct-apply-url.com",
+      "full_url": "https://full-job-listing-url.com",
+      "source": "LinkedIn/Company Careers/Naukri/etc",
       "estimated_ctc_lpa": "8-14 LPA"
     }}
   ]
@@ -240,6 +327,7 @@ CANDIDATE RESUME:
 
 Generate exactly 30 day-by-day resume improvement tips for a DevOps Engineer job hunt.
 Each tip must be specific to THIS candidate's resume, actionable, and include a before/after example.
+Prioritise ATS keyword improvements in days 1-7, skill gap bridging from day 8 onwards.
 
 Return ONLY a JSON object (no markdown, no explanation):
 {{
@@ -247,7 +335,7 @@ Return ONLY a JSON object (no markdown, no explanation):
     {{
       "day": 1,
       "date": "{today}",
-      "focus_area": "Summary Section",
+      "focus_area": "ATS Keywords / Summary Section / Skills / Quantification",
       "tip": "Specific actionable tip for this candidate",
       "example_before": "What their resume currently says",
       "example_after": "Improved version"
@@ -255,50 +343,76 @@ Return ONLY a JSON object (no markdown, no explanation):
   ]
 }}
 
-Generate all 30 days. Vary the focus areas across: Summary, Skills, Experience bullets, Quantification, Keywords, Certifications, Projects, LinkedIn, Cover letter, GitHub profile, etc."""
+Generate all 30 days. Vary focus areas: ATS Keywords, Summary, Skills, Experience bullets, Quantification, Certifications, Projects, LinkedIn, Cover letter, GitHub profile, etc."""
 
 # ── Excel builder ─────────────────────────────────────────────────────────────
 
 JOB_HEADERS = [
-    "Rank", "Company", "Role", "Sector", "Size",
-    "Location", "Exp. Required", "Key Skills",
-    "Fit Score", "Probability", "Match Reason",
-    "Gap / Stretch Reason", "Apply URL", "Source", "Est. CTC (LPA)"
+    "Rank", "Company", "Role", "Sector", "Size", "Location", "Work Type",
+    "Exp. Required", "Key Skills", "Fit Score", "ATS Match", "Probability",
+    "Match Reason", "Gap / Stretch Reason", "Posting Date", "Job ID",
+    "Apply URL", "Full URL", "Source", "Est. CTC (LPA)"
 ]
-JOB_WIDTHS = [6, 22, 28, 14, 12, 16, 13, 34, 10, 11, 36, 30, 40, 14, 14]
+JOB_WIDTHS = [6, 22, 28, 14, 12, 16, 11, 13, 34, 10, 10, 11, 36, 30, 13, 18, 40, 40, 14, 14]
 
 def write_job_row(ws, job):
-    skills = ", ".join(job.get("key_skills_required", []))
-    prob   = job.get("probability_category", "Medium")
-    score  = int(job.get("fit_score", 0))
+    skills    = ", ".join(job.get("key_skills_required", []))
+    prob      = job.get("probability_category", "Medium")
+    score     = int(job.get("fit_score", 0))
+    ats_score = int(job.get("ats_match_score", 0))
     row = [
-        job.get("rank", ""), job.get("company", ""), job.get("role", ""),
-        job.get("sector", ""), job.get("company_size", ""), job.get("location", ""),
-        job.get("experience_required", ""), skills, score, prob,
-        job.get("match_reason", ""), job.get("gap_reason", ""),
-        job.get("apply_url", ""), job.get("source", ""),
+        job.get("rank", ""),
+        job.get("company", ""),
+        job.get("role", ""),
+        job.get("sector", ""),
+        job.get("company_size", ""),
+        job.get("location", ""),
+        job.get("work_type", ""),
+        job.get("experience_required", ""),
+        skills,
+        score,
+        ats_score,
+        prob,
+        job.get("match_reason", ""),
+        job.get("gap_reason", ""),
+        job.get("posting_date", ""),
+        job.get("job_id", ""),
+        job.get("apply_url", ""),
+        job.get("full_url", ""),
+        job.get("source", ""),
         job.get("estimated_ctc_lpa", "Unknown"),
     ]
     ws.append(row)
     r = ws.max_row
     ws.row_dimensions[r].height = 42
     prob_text_color, prob_bg = PROB_COLORS.get(prob, ("000000", "FFFFFF"))
+
+    # work_type color map
+    wtype_colors = {"Remote": "E3F2FD", "Hybrid": "FFF9C4", "On-site": "FCE4EC"}
+
     for col_idx in range(1, len(row)+1):
         cell = ws.cell(row=r, column=col_idx)
         cell.border    = thin_border()
         cell.alignment = left() if col_idx > 2 else center()
-        if col_idx == 9:
+        if col_idx == 10:   # Fit Score
             cell.fill = score_fill(score)
             cell.font = bfont(11, "1B1B1B"); cell.alignment = center()
-        elif col_idx == 10:
+        elif col_idx == 11:   # ATS Match
+            cell.fill = score_fill(ats_score)
+            cell.font = bfont(11, "1B1B1B"); cell.alignment = center()
+        elif col_idx == 12:   # Probability
             cell.fill = hfill(prob_bg)
             cell.font = bfont(10, prob_text_color); cell.alignment = center()
-        elif col_idx == 13:
+        elif col_idx == 7:    # Work Type
+            wt = job.get("work_type", "")
+            cell.fill = hfill(wtype_colors.get(wt, "FFFFFF"))
+            cell.font = Font(size=10, color="1B1B1B", bold=True); cell.alignment = center()
+        elif col_idx in (17, 18):   # Apply URL, Full URL
             cell.font = Font(color="1565C0", underline="single", size=10)
         else:
             cell.font = Font(size=10, color="1B1B1B")
 
-def build_excel(jobs_data, tips_data, output_path, used_model):
+def build_excel(jobs_data, tips_data, output_path, model_name):
     wb = openpyxl.Workbook()
 
     today     = jobs_data.get("analysis_date", str(datetime.date.today()))
@@ -306,6 +420,9 @@ def build_excel(jobs_data, tips_data, output_path, used_model):
     candidate = jobs_data.get("candidate_summary", "")
     strengths = jobs_data.get("resume_strengths", [])
     gaps      = jobs_data.get("resume_gaps", [])
+    ats_score = jobs_data.get("ats_score", "N/A")
+    ats_issues   = jobs_data.get("ats_issues", [])
+    ats_keywords = jobs_data.get("ats_missing_keywords", [])
     jobs      = jobs_data.get("jobs", [])
     tips      = tips_data.get("daily_resume_tips", [])
 
@@ -345,12 +462,13 @@ def build_excel(jobs_data, tips_data, output_path, used_model):
 
     ws.append([])
     for label, val, fill_hex in [
-        ("Total Opportunities", len(jobs),   "283593"),
-        ("High Probability",    len(high),   "1B5E20"),
-        ("Medium Probability",  len(medium), "E65100"),
-        ("Stretch Roles",       len(stretch),"B71C1C"),
-        ("Target Date",         target,      "4A148C"),
-        ("AI Model",            model_name,  "546E7A"),
+        ("Total Opportunities", len(jobs),    "283593"),
+        ("High Probability",    len(high),    "1B5E20"),
+        ("Medium Probability",  len(medium),  "E65100"),
+        ("Stretch Roles",       len(stretch), "B71C1C"),
+        ("Target Date",         target,       "4A148C"),
+        ("AI Model",            model_name,   "546E7A"),
+        ("ATS Resume Score",    f"{ats_score}/100", "00695C"),
     ]:
         ws.append([label, val])
         r = ws.max_row
@@ -378,6 +496,26 @@ def build_excel(jobs_data, tips_data, output_path, used_model):
     c.font = bfont(12, "B71C1C"); c.fill = hfill("FFCDD2"); c.border = thin_border()
     for g in gaps:
         ws.append(["", f"- {g}"])
+        ws.cell(row=ws.max_row, column=2).font = Font(size=11, color="1B1B1B")
+        ws.row_dimensions[ws.max_row].height = 20
+
+    ws.append([])
+    ws.append(["ATS Issues", ""])
+    ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
+    c = ws.cell(row=ws.max_row, column=1)
+    c.font = bfont(12, "E65100"); c.fill = hfill("FFE0B2"); c.border = thin_border()
+    for issue in ats_issues:
+        ws.append(["", f"- {issue}"])
+        ws.cell(row=ws.max_row, column=2).font = Font(size=11, color="1B1B1B")
+        ws.row_dimensions[ws.max_row].height = 20
+
+    ws.append([])
+    ws.append(["ATS Missing Keywords", ""])
+    ws.merge_cells(f"A{ws.max_row}:B{ws.max_row}")
+    c = ws.cell(row=ws.max_row, column=1)
+    c.font = bfont(12, "FFFFFF"); c.fill = hfill("00695C"); c.border = thin_border()
+    if ats_keywords:
+        ws.append(["", ", ".join(ats_keywords)])
         ws.cell(row=ws.max_row, column=2).font = Font(size=11, color="1B1B1B")
         ws.row_dimensions[ws.max_row].height = 20
 
@@ -448,23 +586,26 @@ def main():
         resume_content = extract_pdf_text(resume_b64) or "[PDF unreadable]"
     else:
         resume_content = resume_text or ""
-
     print(f"📝 Resume length: {len(resume_content)} chars")
 
+    # ── Step 0: Live job search ───────────────────────────────────────────────
+    print("\n🌐 STEP 0: Searching live jobs via SerpAPI...")
+    live_jobs_text = search_live_jobs(today)
+
     # ── Call 1: Jobs ──────────────────────────────────────────────────────────
-    print("\n🤖 CALL 1: Fetching job listings...")
-    jobs_prompt = build_jobs_prompt(resume_content, today, target_date)
-    jobs_data   = call_openrouter(jobs_prompt, call_label="JOBS")
+    print("\n🤖 CALL 1: Analysing resume + scoring jobs...")
+    jobs_prompt = build_jobs_prompt(resume_content, today, target_date, live_jobs_text)
+    jobs_data, model_name = call_openrouter(jobs_prompt, call_label="JOBS")
 
     # ── Call 2: Tips ──────────────────────────────────────────────────────────
     print("\n🤖 CALL 2: Generating 30-day resume tips...")
     tips_prompt = build_tips_prompt(resume_content, today, target_date)
-    tips_data   = call_openrouter(tips_prompt, call_label="TIPS")
+    tips_data, _ = call_openrouter(tips_prompt, call_label="TIPS")
 
     # ── Build Excel ───────────────────────────────────────────────────────────
     output_path = f"jobs_{today}.xlsx"
     print(f"\n📊 Building Excel workbook -> {output_path}")
-    build_excel(jobs_data, tips_data, output_path, used_model)
+    build_excel(jobs_data, tips_data, output_path, model_name)
 
 if __name__ == "__main__":
     main()
