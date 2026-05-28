@@ -1,55 +1,44 @@
-name: Daily Job Hunt
+name: 🎯 Daily Job Hunt
 
 on:
   schedule:
-    # 10:00 AM IST = 04:30 UTC
-    - cron: "30 4 * * *"
-  workflow_dispatch:   # manual trigger from GitHub UI for testing
-    inputs:
-      run_step:
-        description: "Which step to run?"
-        required: true
-        default: "all"
-        type: choice
-        options:
-          - all
-          - generate_excel
-          - send_email
-          - upload_artifact
+    # 2:00 AM IST = 20:30 UTC (off-peak — less free-tier congestion)
+    # Change back to "30 4 * * *" for 10 AM IST if you prefer
+    - cron: "30 20 * * *"
+  workflow_dispatch:   # manual trigger from GitHub UI
 
 jobs:
   job-hunt:
     runs-on: ubuntu-latest
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # silence Node.js 20 warning
+
     steps:
-      - name: Checkout repo
+      - name: ⬇️ Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: pip install openpyxl pdfminer.six
 
-      - name: Run AI job search + generate Excel
-        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'generate_excel' }}
+      - name: 🤖 Run AI job search + generate Excel
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          SERPAPI_KEY:        ${{ secrets.SERPAPI_KEY }}
         run: python scripts/generate_excel.py
 
-      - name: Send email with Excel attachment
-        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'send_email' }}
+      - name: 📧 Send email with Excel attachment
         env:
           GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
         run: python scripts/send_email.py
 
-      - name: Upload Excel as workflow artifact (30-day backup)
-        if: ${{ github.event_name == 'schedule' || inputs.run_step == 'all' || inputs.run_step == 'upload_artifact' }}
+      - name: 📁 Upload Excel as workflow artifact (backup)
         uses: actions/upload-artifact@v4
         with:
           name: job-hunt-${{ github.run_id }}
