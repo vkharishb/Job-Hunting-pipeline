@@ -27,11 +27,13 @@ jobs:
         run: pip install openpyxl pdfminer.six
 
       - name: 🤖 Run AI job search + generate Excel
+        id: generate
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: python scripts/generate_excel.py
 
       - name: 📧 Send email with Excel attachment
+        id: send_email
         env:
           GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
@@ -44,3 +46,14 @@ jobs:
           name: job-hunt-${{ github.run_id }}
           path: "jobs_*.xlsx"
           retention-days: 30
+
+      - name: 🚨 Send failure notification email
+        if: failure()
+        env:
+          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
+          RUN_ID:         ${{ github.run_id }}
+          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED_STEP:    ${{ steps.generate.outcome == 'failure' && 'Run AI job search + generate Excel' || steps.send_email.outcome == 'failure' && 'Send email with Excel attachment' || 'Unknown step' }}
+        run: python scripts/send_failure_email.py
