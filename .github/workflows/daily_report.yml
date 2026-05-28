@@ -2,9 +2,8 @@ name: 🎯 Daily Job Hunt
 
 on:
   schedule:
-    # 2:00 AM IST = 20:30 UTC (off-peak — less free-tier congestion)
-    # Change back to "30 4 * * *" for 10 AM IST if you prefer
-    - cron: "30 20 * * *"
+     # it will auto trigger on schedule for 10 AM  and 10:00 PM IST
+    - cron: 30 4,16 * * *
   workflow_dispatch:   # manual trigger from GitHub UI
 
 jobs:
