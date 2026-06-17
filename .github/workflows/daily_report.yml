@@ -3,7 +3,7 @@ name: 🎯 Daily Job Hunt
 on:
   schedule:
      # it will auto trigger on schedule for 10 AM  and 10:00 PM IST
-    - cron: 30 4,16 * * *
+  #  - cron: 30 4,16 * * *
   workflow_dispatch:   # manual trigger from GitHub UI
 
 jobs:
